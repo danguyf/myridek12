@@ -33,14 +33,14 @@ class MyRideK12Api:
 
     def __init__(
         self,
-        session: aiohttp.ClientSession,
-        username: str,
-        password: str,
+        session: Any = None,
+        username: str = "",
+        password: str = "",
     ) -> None:
         """Initialize the API client."""
         self._session = session
-        self.username = username
-        self.password = password
+        self.username = username.strip()
+        self.password = password.strip()
         self.id_token: str | None = None
         self.access_token: str | None = None
         self.refresh_token: str | None = None
@@ -56,15 +56,13 @@ class MyRideK12Api:
         data: bytes | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | str]:
         """Perform HTTP request using aiohttp or urllib fallback."""
-        if headers is None:
-            headers = {}
-        
-        # Prevent urllib/HTTP 1.1 Expect: 100-continue issues with AWS ALB
-        headers["Expect"] = ""
+        req_headers = dict(headers) if headers else {}
 
         if self._session is not None and hasattr(self._session, "request"):
+            # Remove any empty header values so aiohttp doesn't send malformed headers
+            clean_headers = {k: v for k, v in req_headers.items() if v != ""}
             async with self._session.request(
-                method, url, headers=headers, data=data
+                method, url, headers=clean_headers, data=data
             ) as resp:
                 status = resp.status
                 try:
@@ -77,7 +75,9 @@ class MyRideK12Api:
         import urllib.request
 
         def _do_urllib():
-            kwargs: dict[str, Any] = {"headers": headers, "method": method}
+            urllib_headers = dict(req_headers)
+            urllib_headers["Expect"] = ""  # Prevent urllib 100-continue 417 error on AWS ALB
+            kwargs: dict[str, Any] = {"headers": urllib_headers, "method": method}
             if data is not None:
                 kwargs["data"] = data
             req = urllib.request.Request(url, **kwargs)
