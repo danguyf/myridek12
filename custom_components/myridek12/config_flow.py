@@ -52,12 +52,14 @@ class MyRideK12ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             try:
                 await api.authenticate()
-            except MyRideK12AuthError:
+            except MyRideK12AuthError as err:
+                _LOGGER.error("My Ride K-12 authentication error: %s", err)
                 errors["base"] = "invalid_auth"
-            except MyRideK12ApiError:
+            except MyRideK12ApiError as err:
+                _LOGGER.error("My Ride K-12 API connection error: %s", err)
                 errors["base"] = "cannot_connect"
             except Exception as err:
-                _LOGGER.exception("Unexpected exception: %s", err)
+                _LOGGER.exception("Unexpected error during My Ride K-12 setup: %s", err)
                 errors["base"] = "unknown"
             else:
                 return self.async_create_entry(

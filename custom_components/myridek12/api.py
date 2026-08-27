@@ -61,15 +61,19 @@ class MyRideK12Api:
         if self._session is not None and hasattr(self._session, "request"):
             # Remove any empty header values so aiohttp doesn't send malformed headers
             clean_headers = {k: v for k, v in req_headers.items() if v != ""}
-            async with self._session.request(
-                method, url, headers=clean_headers, data=data
-            ) as resp:
-                status = resp.status
-                try:
-                    res_data = await resp.json()
-                except Exception:
-                    res_data = await resp.text()
-                return status, res_data
+            try:
+                async with self._session.request(
+                    method, url, headers=clean_headers, data=data
+                ) as resp:
+                    status = resp.status
+                    try:
+                        res_data = await resp.json()
+                    except Exception:
+                        res_data = await resp.text()
+                    return status, res_data
+            except Exception as err:
+                _LOGGER.error("aiohttp request failed for %s (%s): %s", method, url, err)
+                raise MyRideK12ApiError(f"Connection error to {url}: {err}") from err
 
         # Fallback to urllib.request for standalone Python execution
         import urllib.request
@@ -94,6 +98,8 @@ class MyRideK12Api:
                     return e.code, json.loads(raw)
                 except Exception:
                     return e.code, raw
+            except Exception as e:
+                return 500, str(e)
 
         import asyncio
         return await asyncio.to_thread(_do_urllib)
@@ -123,7 +129,7 @@ class MyRideK12Api:
 
         if status != 200:
             _LOGGER.error("Cognito auth failed (%s): %s", status, data)
-            raise MyRideK12AuthError(f"Authentication failed: {status}")
+            raise MyRideK12AuthError(f"Cognito auth failed ({status}): {data}")
 
         if isinstance(data, dict):
             auth_res = data.get("AuthenticationResult", {})

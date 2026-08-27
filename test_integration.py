@@ -36,9 +36,51 @@ if not USERNAME or not PASSWORD:
     sys.exit(1)
 
 
-async def main():
-    logger.info("Starting My Ride K-12 integration verification test...")
-    api = MyRideK12Api(None, USERNAME, PASSWORD)
+class MockAiohttpResponse:
+    def __init__(self, status: int, raw_text: str):
+        self.status = status
+        self._raw_text = raw_text
+
+    async def json(self):
+        import json
+        return json.loads(self._raw_text)
+
+    async def text(self):
+        return self._raw_text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
+class MockAiohttpSession:
+    """Mock aiohttp.ClientSession that uses urllib to simulate aiohttp execution."""
+
+    def request(self, method, url, headers=None, data=None, **kwargs):
+        import urllib.request
+        req_headers = dict(headers) if headers else {}
+        req_kwargs = {"headers": req_headers, "method": method}
+        if data is not None:
+            req_kwargs["data"] = data
+
+        req = urllib.request.Request(url, **req_kwargs)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                status = resp.status
+                raw = resp.read().decode("utf-8")
+                return MockAiohttpResponse(status, raw)
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8")
+            return MockAiohttpResponse(e.code, raw)
+
+
+async def run_test_suite(session_obj, mode_name: str):
+    logger.info("============================================================")
+    logger.info("Running Test Suite (%s)...", mode_name)
+    logger.info("============================================================")
+    api = MyRideK12Api(session_obj, USERNAME, PASSWORD)
 
     logger.info("Testing AWS Cognito Authentication...")
     auth_success = await api.authenticate()
@@ -96,9 +138,17 @@ async def main():
     assert api.is_in_active_window(6, 8, True, night_time) is False
     logger.info("✓ Active window filter logic verified.")
 
-    logger.info("=" * 60)
-    logger.info("ALL VERIFICATION TESTS PASSED SUCCESSFULLY!")
-    logger.info("=" * 60)
+
+async def main():
+    # Test 1: Standard urllib mode (session=None)
+    await run_test_suite(None, "Standalone urllib mode")
+
+    # Test 2: Simulated aiohttp Session mode (session=MockAiohttpSession())
+    await run_test_suite(MockAiohttpSession(), "Simulated aiohttp Session mode")
+
+    logger.info("============================================================")
+    logger.info("ALL VERIFICATION TESTS PASSED (BOTH SESSION MODES)!")
+    logger.info("============================================================")
 
 
 if __name__ == "__main__":
