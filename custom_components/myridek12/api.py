@@ -59,11 +59,17 @@ class MyRideK12Api:
         req_headers = dict(headers) if headers else {}
 
         if self._session is not None and hasattr(self._session, "request"):
-            # Remove any empty header values so aiohttp doesn't send malformed headers
+            # Ensure User-Agent is myridek12 and strip empty headers
             clean_headers = {k: v for k, v in req_headers.items() if v != ""}
+            clean_headers["User-Agent"] = DEFAULT_USER_AGENT
+
             try:
                 async with self._session.request(
-                    method, url, headers=clean_headers, data=data
+                    method,
+                    url,
+                    headers=clean_headers,
+                    data=data,
+                    skip_auto_headers={"User-Agent", "user-agent"},
                 ) as resp:
                     status = resp.status
                     try:
