@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "My Ride K-12 Authentication",
+        "description": "Enter your My Ride K-12 portal credentials.",
+        "data": {
+          "username": "Email / Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Failed to connect to My Ride K-12 service.",
+      "unknown": "Unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "Account is already configured in Home Assistant."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "My Ride K-12 Options",
+        "description": "Configure active tracking hours and preferences.",
+        "data": {
+          "start_hour": "Start Hour (0-23, default 6 AM)",
+          "end_hour": "End Hour (1-24, default 8 AM)",
+          "weekdays_only": "Active on weekdays only (Mon-Fri)",
+          "distance_unit": "Distance Unit (mi or km)"
+        }
+      }
+    }
+  }
+}
