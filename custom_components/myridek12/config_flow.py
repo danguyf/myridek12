@@ -47,8 +47,7 @@ class MyRideK12ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(username.lower())
             self._abort_if_unique_id_configured()
 
-            session = aiohttp_client.async_get_clientsession(self.hass)
-            api = MyRideK12Api(session, username, password)
+            api = MyRideK12Api(None, username, password)
 
             try:
                 await api.authenticate()

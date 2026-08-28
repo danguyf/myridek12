@@ -48,6 +48,29 @@ class MyRideK12Api:
         self.tenant_id: str | None = None
         self.user_info: dict[str, Any] | None = None
 
+    async def close(self) -> None:
+        """Close the dedicated aiohttp session if open."""
+        if self._session is not None and hasattr(self._session, "close") and not getattr(self._session, "closed", True):
+            await self._session.close()
+
+    def _extract_tenant_from_jwt(self) -> str | None:
+        """Extract tenant ID from JWT claims if available."""
+        import base64
+        for token_str in [self.id_token, self.access_token]:
+            if not token_str:
+                continue
+            try:
+                parts = token_str.split(".")
+                if len(parts) >= 2:
+                    padding = "=" * (4 - len(parts[1]) % 4)
+                    payload = json.loads(base64.urlsafe_b64decode(parts[1] + padding).decode("utf-8"))
+                    groups = payload.get("cognito:groups", [])
+                    if groups and len(groups) > 0:
+                        return groups[0]
+            except Exception as err:
+                _LOGGER.debug("Could not parse JWT token for tenant ID: %s", err)
+        return None
+
     async def _make_request(
         self,
         url: str,
@@ -55,36 +78,14 @@ class MyRideK12Api:
         headers: dict[str, str] | None = None,
         data: bytes | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | str]:
-        """Perform HTTP request using aiohttp or urllib fallback."""
+        """Perform HTTP request asynchronously using standard urllib to avoid session header mutations."""
         req_headers = dict(headers) if headers else {}
+        req_headers["User-Agent"] = DEFAULT_USER_AGENT
 
-        if self._session is not None and hasattr(self._session, "request"):
-            # Ensure User-Agent is myridek12 and strip empty headers
-            clean_headers = {k: v for k, v in req_headers.items() if v != ""}
-            clean_headers["User-Agent"] = DEFAULT_USER_AGENT
-
-            try:
-                async with self._session.request(
-                    method,
-                    url,
-                    headers=clean_headers,
-                    data=data,
-                    skip_auto_headers={"User-Agent", "user-agent"},
-                ) as resp:
-                    status = resp.status
-                    try:
-                        res_data = await resp.json()
-                    except Exception:
-                        res_data = await resp.text()
-                    return status, res_data
-            except Exception as err:
-                _LOGGER.error("aiohttp request failed for %s (%s): %s", method, url, err)
-                raise MyRideK12ApiError(f"Connection error to {url}: {err}") from err
-
-        # Fallback to urllib.request for standalone Python execution
         import urllib.request
+        import asyncio
 
-        def _do_urllib():
+        def _do_http_sync():
             urllib_headers = dict(req_headers)
             urllib_headers["Expect"] = ""  # Prevent urllib 100-continue 417 error on AWS ALB
             kwargs: dict[str, Any] = {"headers": urllib_headers, "method": method}
@@ -92,7 +93,7 @@ class MyRideK12Api:
                 kwargs["data"] = data
             req = urllib.request.Request(url, **kwargs)
             try:
-                with urllib.request.urlopen(req) as resp:
+                with urllib.request.urlopen(req, timeout=20) as resp:
                     raw = resp.read().decode("utf-8")
                     try:
                         return resp.status, json.loads(raw)
@@ -100,15 +101,16 @@ class MyRideK12Api:
                         return resp.status, raw
             except urllib.error.HTTPError as e:
                 raw = e.read().decode("utf-8")
+                _LOGGER.debug("HTTPError %s on %s %s: %s", e.code, method, url, raw)
                 try:
                     return e.code, json.loads(raw)
                 except Exception:
                     return e.code, raw
             except Exception as e:
+                _LOGGER.error("Network error on %s %s: %s", method, url, e)
                 return 500, str(e)
 
-        import asyncio
-        return await asyncio.to_thread(_do_urllib)
+        return await asyncio.to_thread(_do_http_sync)
 
     async def authenticate(self) -> bool:
         """Authenticate using AWS Cognito USER_PASSWORD_AUTH."""
@@ -134,7 +136,7 @@ class MyRideK12Api:
         )
 
         if status != 200:
-            _LOGGER.error("Cognito auth failed (%s): %s", status, data)
+            _LOGGER.error("Cognito authentication failed (%s): %s", status, data)
             raise MyRideK12AuthError(f"Cognito auth failed ({status}): {data}")
 
         if isinstance(data, dict):
@@ -147,8 +149,9 @@ class MyRideK12Api:
                 datetime.timezone.utc
             ) + datetime.timedelta(seconds=expires_in - 60)
 
-        _LOGGER.debug("My Ride K-12 authentication successful")
-        await self._fetch_user_info()
+        # Extract tenant ID from JWT tokens
+        self.tenant_id = self._extract_tenant_from_jwt()
+        _LOGGER.debug("Tenant ID extracted from JWT: %s", self.tenant_id)
         return True
 
     async def _ensure_authenticated(self) -> None:
@@ -159,8 +162,9 @@ class MyRideK12Api:
 
     def _get_api_headers(self) -> dict[str, str]:
         """Get standard HTTP headers for API requests."""
+        token = self.access_token or self.id_token
         headers = {
-            "Authorization": f"Bearer {self.access_token or self.id_token}",
+            "Authorization": f"Bearer {token}",
             "User-Agent": DEFAULT_USER_AGENT,
             "Accept": "application/json",
         }
@@ -168,24 +172,32 @@ class MyRideK12Api:
             headers["x-tenant-id"] = self.tenant_id
         return headers
 
-    async def _fetch_user_info(self) -> dict[str, Any]:
-        """Fetch user profile to extract tenant/group GUID."""
+    async def _fetch_user_info(self) -> dict[str, Any] | None:
+        """Fetch user profile to extract tenant/group GUID if available."""
+        token = self.access_token or self.id_token
         headers = {
-            "Authorization": f"Bearer {self.access_token or self.id_token}",
+            "Authorization": f"Bearer {token}",
             "User-Agent": DEFAULT_USER_AGENT,
             "Accept": "application/json",
         }
+        if self.tenant_id:
+            headers["x-tenant-id"] = self.tenant_id
+
         url = f"{API_BASE_URL}/api/user"
 
-        status, data = await self._make_request(url, method="GET", headers=headers)
-        if status == 200 and isinstance(data, dict):
-            self.user_info = data
-            groups = data.get("groups", [])
-            if groups:
-                self.tenant_id = groups[0].get("groupGuid")
-                _LOGGER.debug("Extracted tenant ID: %s", self.tenant_id)
-            return data
-        raise MyRideK12ApiError(f"Failed to fetch user info: {status}")
+        try:
+            status, data = await self._make_request(url, method="GET", headers=headers)
+            if status == 200 and isinstance(data, dict):
+                self.user_info = data
+                groups = data.get("groups", [])
+                if groups and not self.tenant_id:
+                    self.tenant_id = groups[0].get("groupGuid")
+                    _LOGGER.debug("Extracted tenant ID from /api/user: %s", self.tenant_id)
+                return data
+            _LOGGER.debug("Non-critical: /api/user returned HTTP %s: %s", status, data)
+        except Exception as err:
+            _LOGGER.debug("Non-critical: Error fetching /api/user: %s", err)
+        return None
 
     async def get_students(self) -> list[dict[str, Any]]:
         """Fetch student details and assigned bus runs."""
@@ -195,8 +207,16 @@ class MyRideK12Api:
         status, data = await self._make_request(
             url, method="GET", headers=self._get_api_headers()
         )
+        if status == 401:
+            _LOGGER.info("Received 401 fetching students, re-authenticating and retrying...")
+            await self.authenticate()
+            status, data = await self._make_request(
+                url, method="GET", headers=self._get_api_headers()
+            )
+
         if status == 200 and isinstance(data, list):
             return data
+        _LOGGER.error("Failed to fetch students (HTTP %s): %s", status, data)
         raise MyRideK12ApiError(f"Failed to fetch students: {status}")
 
     async def get_student_scans(self) -> list[dict[str, Any]]:
@@ -207,8 +227,16 @@ class MyRideK12Api:
         status, data = await self._make_request(
             url, method="GET", headers=self._get_api_headers()
         )
+        if status == 401:
+            _LOGGER.info("Received 401 fetching scans, re-authenticating and retrying...")
+            await self.authenticate()
+            status, data = await self._make_request(
+                url, method="GET", headers=self._get_api_headers()
+            )
+
         if status == 200 and isinstance(data, list):
             return data
+        _LOGGER.error("Failed to fetch student scans (HTTP %s): %s", status, data)
         raise MyRideK12ApiError(f"Failed to fetch student scans: {status}")
 
     async def fetch_all_bus_data(self) -> dict[str, Any]:

@@ -36,8 +36,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     username = entry.data[CONF_USERNAME]
     password = entry.data[CONF_PASSWORD]
 
-    session = aiohttp_client.async_get_clientsession(hass)
-    api = MyRideK12Api(session, username, password)
+    api = MyRideK12Api(None, username, password)
 
     async def async_update_data() -> dict[str, Any]:
         """Fetch data from My Ride K-12 API."""
@@ -90,6 +89,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok := await hass.config_entries.async_unload_platforms(
         entry, PLATFORMS
     ):
-        hass.data[DOMAIN].pop(entry.entry_id)
+        data = hass.data[DOMAIN].pop(entry.entry_id, {})
+        if "api" in data:
+            await data["api"].close()
 
     return unload_ok
