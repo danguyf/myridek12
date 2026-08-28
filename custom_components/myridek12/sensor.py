@@ -99,14 +99,14 @@ class MyRideK12SchoolBusDistanceSensor(CoordinatorEntity, SensorEntity):
         return self.entry.options.get(CONF_DISTANCE_UNIT, DEFAULT_DISTANCE_UNIT)
 
     @property
-    def native_value(self) -> float | str | None:
-        """Return the state of the sensor."""
+    def native_value(self) -> float | None:
+        """Return the state of the sensor as a numeric distance value."""
         if not self.coordinator.data:
-            return None
+            return -1.0
 
         is_active = self.coordinator.data.get("is_active_window", False)
         if not is_active:
-            return "Inactive"
+            return -1.0
 
         st_data = self._get_student_data()
 
@@ -114,7 +114,7 @@ class MyRideK12SchoolBusDistanceSensor(CoordinatorEntity, SensorEntity):
         stop_lat = st_data.get("stop_latitude")
         stop_lon = st_data.get("stop_longitude")
 
-        # If live bus coordinates exist in coordinator data, calculate distance
+        # If live bus coordinates exist in coordinator data, calculate distance to stop
         bus_lat = st_data.get("bus_latitude")
         bus_lon = st_data.get("bus_longitude")
 
@@ -125,11 +125,11 @@ class MyRideK12SchoolBusDistanceSensor(CoordinatorEntity, SensorEntity):
                 bus_lat, bus_lon, stop_lat, stop_lon, unit=unit
             )
 
-        # If bus is at the stop or scan location is current, distance to stop is 0.0
+        # When vehicle is at the stop or scan location is confirmed, distance to stop is 0.0
         if stop_lat is not None and stop_lon is not None:
             return 0.0
 
-        return "Searching"
+        return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -145,7 +145,12 @@ class MyRideK12SchoolBusDistanceSensor(CoordinatorEntity, SensorEntity):
         last_name = st_data.get("last_name", "")
         full_name = f"{first_name} {last_name}".strip()
 
+        is_active = self.coordinator.data.get("is_active_window", False)
+        status = "Active" if is_active else "Inactive"
+
         return {
+            "distance": self.native_value,
+            "status": status,
             "student_name": full_name,
             "student_id": self.student_id,
             "school_name": st_data.get("school_name"),
@@ -158,7 +163,7 @@ class MyRideK12SchoolBusDistanceSensor(CoordinatorEntity, SensorEntity):
             "stop_longitude": st_data.get("stop_longitude"),
             "last_scan_time": st_data.get("last_scan_time"),
             "last_scan_state": st_data.get("last_scan_state"),
-            "active_window": self.coordinator.data.get("is_active_window", False),
+            "active_window": is_active,
             "active_window_hours": f"{start_h:02d}:00 - {end_h:02d}:00",
             "last_poll_time": self.coordinator.data.get("last_poll_time"),
         }
