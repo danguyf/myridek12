@@ -1,15 +1,15 @@
 # My Ride K-12 Home Assistant Integration
 
-A Home Assistant custom component integration for **Tyler Technologies' My Ride K-12** (formerly Traversa Ride 360) platform.
+A Home Assistant custom component integration for **Tyler Technologies' My Ride K-12** platform.
 
-Tracks school bus location and distance to student bus stop / home between **6:00 AM and 8:00 AM** (or custom configured hours).
+Tracks school bus location and distance to student bus stop / home during user-configured active hours. (Defaults to between **6:00 AM and 8:00 AM**.)
 
 ---
 
 ## Features
 
-- 🚌 **School Bus Distance Sensor**: Creates a Home Assistant entity (`sensor.school_bus_distance_zachary`) displaying distance in miles or kilometers.
-- ⏰ **Time-Window Filtering**: Monitors bus location between **6:00 AM and 8:00 AM** on school days (configurable via UI options).
+- 🚌 **School Bus Distance Sensor**: Creates a Home Assistant entity per student (e.g. `sensor.school_bus_distance_zachary`) displaying distance in miles or kilometers.
+- ⏰ **Active Window Polling**: Monitors bus location only during user-configured active hours. (Defaults to between **6:00 AM and 8:00 AM** on school days).
 - 🔑 **Automatic AWS Cognito Auth**: Authenticates securely using your My Ride K-12 portal credentials.
 - 📍 **Bus Stop & Route Metadata**: Exposes detailed entity attributes:
   - Student Name & School
@@ -60,11 +60,11 @@ Click **Configure** on the My Ride K-12 integration card to customize:
 ## Sensor Entities & Attributes
 
 A dedicated sensor entity is automatically created for **each child** associated with your My Ride K-12 account:
-- Entity Name format: `School Bus Distance <FirstName><LastName>` (e.g. `School Bus Distance ZacharyFowlkes`)
-- Entity ID format: `sensor.school_bus_distance_<firstname><lastname>` (e.g. `sensor.school_bus_distance_zacharyfowlkes`)
+- Entity Name format: `School Bus Distance <FirstName><LastName>` (e.g. `School Bus Distance ZacharySmith`)
+- Entity ID format: `sensor.school_bus_distance_<firstname><lastname>` (e.g. `sensor.school_bus_distance_zacharysmith`)
 
-### Example Sensor: `sensor.school_bus_distance_zacharyfowlkes`
-- **State**: Distance in miles/km (e.g. `1.31`), or `Inactive` outside 6-8 AM monitoring hours.
+### Example Sensor: `sensor.school_bus_distance_zacharysmith`
+- **State**: Distance in miles/km (e.g. `1.31`), or `Inactive` outside active monitoring hours.
 - **Attributes**:
   distance
   status
