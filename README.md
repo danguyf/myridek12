@@ -66,6 +66,7 @@ A dedicated sensor entity is automatically created for **each child** associated
 ### Example Sensor: `sensor.school_bus_distance_zacharysmith`
 - **State**: Distance in miles/km (e.g. `1.31`), or `Inactive` outside active monitoring hours.
 - **Attributes**:
+  ```yaml
   distance
   status
   student_name
@@ -78,8 +79,8 @@ A dedicated sensor entity is automatically created for **each child** associated
   stop_location
   stop_latitude
   stop_longitude
-  active_window: true
-  active_window_hours: 06:00 - 08:00
+  active_window
+  active_window_hours
   ```
 
 ---
