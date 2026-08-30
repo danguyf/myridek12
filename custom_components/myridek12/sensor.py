@@ -38,18 +38,22 @@ async def async_setup_entry(
     """Set up My Ride K-12 sensor entities (one per child)."""
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator: DataUpdateCoordinator = data["coordinator"]
+    api: MyRideK12Api = data["api"]
 
     students = coordinator.data.get("students", []) if coordinator.data else []
+
+    # If student list is empty, fetch student roster directly via API to ensure proper entity creation
+    if not students:
+        try:
+            students = await api.get_students()
+        except Exception as err:
+            _LOGGER.error("Failed to fetch students during sensor platform setup: %s", err)
 
     entities: list[MyRideK12SchoolBusDistanceSensor] = []
     for student in students:
         entities.append(
             MyRideK12SchoolBusDistanceSensor(coordinator, entry, student)
         )
-
-    if not entities:
-        # Fallback if no students returned yet
-        entities.append(MyRideK12SchoolBusDistanceSensor(coordinator, entry, {}))
 
     async_add_entities(entities)
 
@@ -84,7 +88,7 @@ class MyRideK12SchoolBusDistanceSensor(CoordinatorEntity, SensorEntity):
         if full_name_clean:
             self._attr_name = f"School Bus Distance {full_name_clean}"
         else:
-            self._attr_name = "School Bus Distance"
+            self._attr_name = f"School Bus Distance {self.student_id}"
 
     def _get_student_data(self) -> dict[str, Any]:
         """Get student-specific data from coordinator data."""
@@ -114,7 +118,7 @@ class MyRideK12SchoolBusDistanceSensor(CoordinatorEntity, SensorEntity):
         stop_lat = st_data.get("stop_latitude")
         stop_lon = st_data.get("stop_longitude")
 
-        # If live bus coordinates exist in coordinator data, calculate distance to stop
+        # Live bus coordinates from LiveVehicleHub SignalR telemetry
         bus_lat = st_data.get("bus_latitude")
         bus_lon = st_data.get("bus_longitude")
 
@@ -125,11 +129,8 @@ class MyRideK12SchoolBusDistanceSensor(CoordinatorEntity, SensorEntity):
                 bus_lat, bus_lon, stop_lat, stop_lon, unit=unit
             )
 
-        # When vehicle is at the stop or scan location is confirmed, distance to stop is 0.0
-        if stop_lat is not None and stop_lon is not None:
-            return 0.0
-
-        return None
+        # Vehicle location is not yet reporting or searching
+        return -1.0
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

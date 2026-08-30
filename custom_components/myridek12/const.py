@@ -27,5 +27,5 @@ CONF_REF_LONGITUDE: Final = "ref_longitude"
 DEFAULT_START_HOUR: Final = 6
 DEFAULT_END_HOUR: Final = 8
 DEFAULT_WEEKDAYS_ONLY: Final = True
-DEFAULT_SCAN_INTERVAL: Final = 30  # seconds
+DEFAULT_SCAN_INTERVAL: Final = 5  # seconds
 DEFAULT_DISTANCE_UNIT: Final = "mi"

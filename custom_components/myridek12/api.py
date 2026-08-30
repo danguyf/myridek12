@@ -48,10 +48,307 @@ class MyRideK12Api:
         self.tenant_id: str | None = None
         self.user_info: dict[str, Any] | None = None
 
+        # Live vehicle tracking state from SignalR stream
+        self._live_vehicles: dict[str, dict[str, Any]] = {}
+        self._hub_running: bool = False
+        self._hub_thread: Any = None
+        self._hub_socket: Any = None
+
     async def close(self) -> None:
-        """Close the dedicated aiohttp session if open."""
+        """Close the dedicated aiohttp session and live SignalR stream if open."""
+        self.stop_live_stream()
         if self._session is not None and hasattr(self._session, "close") and not getattr(self._session, "closed", True):
             await self._session.close()
+
+    def start_live_stream(self) -> None:
+        """Start the background SignalR WebSocket listener for real-time bus locations."""
+        if self._hub_running:
+            return
+        import threading
+        self._hub_running = True
+        self._hub_thread = threading.Thread(target=self._run_signalr_hub, daemon=True)
+        self._hub_thread.start()
+        _LOGGER.info("Started My Ride K-12 LiveVehicleHub stream thread.")
+
+    def stop_live_stream(self) -> None:
+        """Stop the background SignalR WebSocket listener."""
+        self._hub_running = False
+        if self._hub_socket:
+            try:
+                self._hub_socket.close()
+            except Exception:
+                pass
+            self._hub_socket = None
+
+    def _run_signalr_hub(self) -> None:
+        """Background thread executing the SignalR WebSocket client loop."""
+        import base64
+        import os
+        import socket
+        import ssl
+        import time
+        import urllib.request
+
+        while self._hub_running:
+            try:
+                if not self.access_token or not self.tenant_id:
+                    time.sleep(2)
+                    continue
+
+                # Step 1: Negotiate connection with Tyler API Gateway
+                neg_url = f"{API_BASE_URL}/livevehiclehub/negotiate?negotiateVersion=1&x-tenant-id={self.tenant_id}"
+                neg_req = urllib.request.Request(
+                    neg_url,
+                    data=b"",
+                    headers={
+                        "Authorization": f"Bearer {self.access_token}",
+                        "User-Agent": DEFAULT_USER_AGENT,
+                        "x-tenant-id": self.tenant_id,
+                        "Accept": "application/json",
+                    },
+                )
+                with urllib.request.urlopen(neg_req, timeout=15) as resp:
+                    cookies = resp.headers.get_all("Set-Cookie", [])
+                    cookie_header = "; ".join([c.split(";")[0] for c in cookies])
+                    neg_data = json.loads(resp.read().decode("utf-8"))
+                    conn_token = neg_data.get("connectionToken")
+
+                if not conn_token:
+                    time.sleep(5)
+                    continue
+
+                # Step 2: Establish TLS socket connection and WebSocket upgrade
+                ws_key = base64.b64encode(os.urandom(16)).decode("utf-8")
+                path = f"/livevehiclehub?id={conn_token}&x-tenant-id={self.tenant_id}"
+                host = API_BASE_URL.replace("https://", "").replace("http://", "")
+
+                ctx = ssl.create_default_context()
+                raw_sock = socket.create_connection((host, 443), timeout=15)
+                sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+                self._hub_socket = sock
+
+                handshake = (
+                    f"GET {path} HTTP/1.1\r\n"
+                    f"Host: {host}\r\n"
+                    f"Upgrade: websocket\r\n"
+                    f"Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: {ws_key}\r\n"
+                    f"Sec-WebSocket-Version: 13\r\n"
+                    f"Authorization: Bearer {self.access_token}\r\n"
+                    f"x-tenant-id: {self.tenant_id}\r\n"
+                    f"Cookie: {cookie_header}\r\n"
+                    f"User-Agent: {DEFAULT_USER_AGENT}\r\n\r\n"
+                )
+                sock.sendall(handshake.encode("utf-8"))
+                upgrade_resp = sock.recv(4096).decode("utf-8", errors="ignore")
+
+                if "101 Switching Protocols" not in upgrade_resp:
+                    _LOGGER.warning("WebSocket upgrade failed: %s", upgrade_resp[:200])
+                    sock.close()
+                    time.sleep(5)
+                    continue
+
+                # Send SignalR Handshake
+                self._send_ws_text(sock, '{"protocol":"json","version":1}\x1e')
+                sock.settimeout(20)
+                hs_resp = sock.recv(4096)
+                _LOGGER.debug("SignalR Hub connected successfully.")
+
+                last_ping = time.time()
+                while self._hub_running:
+                    # Send periodic keep-alive ping every 15s
+                    if time.time() - last_ping > 15:
+                        self._send_ws_text(sock, '{"type":6}\x1e')
+                        last_ping = time.time()
+
+                    sock.settimeout(5)
+                    try:
+                        head = sock.recv(2)
+                    except socket.timeout:
+                        continue
+                    except Exception:
+                        break
+
+                    if not head or len(head) < 2:
+                        break
+
+                    b1, b2 = head
+                    opcode = b1 & 0x0F
+                    payload_len = b2 & 0x7F
+
+                    if payload_len == 126:
+                        ext = sock.recv(2)
+                        payload_len = int.from_bytes(ext, "big")
+                    elif payload_len == 127:
+                        ext = sock.recv(8)
+                        payload_len = int.from_bytes(ext, "big")
+
+                    # Read payload
+                    chunks = []
+                    bytes_left = payload_len
+                    while bytes_left > 0:
+                        chunk = sock.recv(min(bytes_left, 8192))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        bytes_left -= len(chunk)
+                    payload = b"".join(chunks)
+
+                    if opcode == 1:  # Text frame
+                        raw_msgs = payload.decode("utf-8", errors="ignore").split("\x1e")
+                        for msg_str in raw_msgs:
+                            if not msg_str.strip():
+                                continue
+                            try:
+                                msg = json.loads(msg_str)
+                                self._handle_signalr_message(msg)
+                            except Exception as err:
+                                _LOGGER.debug("Error parsing SignalR message: %s", err)
+                    elif opcode == 8:  # Close frame
+                        _LOGGER.debug("SignalR hub received close frame from server.")
+                        break
+
+            except Exception as err:
+                if self._hub_running:
+                    _LOGGER.debug("LiveVehicleHub connection dropped (%s), reconnecting...", err)
+                    time.sleep(5)
+            finally:
+                if self._hub_socket:
+                    try:
+                        self._hub_socket.close()
+                    except Exception:
+                        pass
+                    self._hub_socket = None
+
+    def _send_ws_text(self, sock: Any, text: str) -> None:
+        """Send masked text frame over raw TLS socket."""
+        import os
+        data = text.encode("utf-8")
+        frame = bytearray([0x81])
+        length = len(data)
+        if length < 126:
+            frame.append(0x80 | length)
+        elif length < 65536:
+            frame.append(0x80 | 126)
+            frame.extend(length.to_bytes(2, "big"))
+        else:
+            frame.append(0x80 | 127)
+            frame.extend(length.to_bytes(8, "big"))
+        mask = os.urandom(4)
+        frame.extend(mask)
+        frame.extend(bytearray(b ^ mask[i % 4] for i, b in enumerate(data)))
+        sock.sendall(frame)
+
+    def _handle_signalr_message(self, msg: dict[str, Any]) -> None:
+        """Process incoming SignalR events like NewLocation or NewETA."""
+        msg_type = msg.get("type")
+        target = msg.get("target")
+        args = msg.get("arguments", [])
+
+        if msg_type == 1 and target == "NewLocation" and args:
+            # Arguments format: [ { vehicleId, latitude, longitude, speed, heading, timestamp, ... } ]
+            for item in args:
+                if isinstance(item, dict):
+                    v_id = str(item.get("vehicleId") or item.get("assetUniqueId") or item.get("vehicleUniqueId") or item.get("busNumber") or "")
+                    lat = item.get("latitude") or item.get("lat")
+                    lon = item.get("longitude") or item.get("lon") or item.get("long")
+                    if v_id and lat is not None and lon is not None:
+                        self._live_vehicles[v_id] = {
+                            "latitude": float(lat),
+                            "longitude": float(lon),
+                            "speed": item.get("speed"),
+                            "heading": item.get("heading"),
+                            "timestamp": item.get("timestamp") or datetime.datetime.now().isoformat(),
+                        }
+                        _LOGGER.info("Received live location for vehicle '%s': (%s, %s)", v_id, lat, lon)
+        elif msg_type == 1 and target == "NewETA" and args:
+            _LOGGER.debug("Received NewETA from SignalR: %s", args)
+        elif msg_type == 1 and target == "Error" and args:
+            _LOGGER.debug("SignalR info/error: %s", args)
+
+    def get_live_vehicle_location(self, *identifiers: str | None) -> tuple[float | None, float | None]:
+        """Look up latest live coordinates matching any bus or vehicle ID."""
+        for ident in identifiers:
+            if not ident:
+                continue
+            s_ident = str(ident).strip()
+            if s_ident in self._live_vehicles:
+                loc = self._live_vehicles[s_ident]
+                return loc["latitude"], loc["longitude"]
+            # Check normalized key match (e.g. "EV 75" vs "EV75")
+            norm_ident = s_ident.replace(" ", "").upper()
+            for key, val in self._live_vehicles.items():
+                if key.replace(" ", "").upper() == norm_ident:
+                    return val["latitude"], val["longitude"]
+        return None, None
+
+    async def fetch_all_bus_data(self) -> dict[str, Any]:
+        """Fetch consolidated student, route, and live stop data per student."""
+        await self._ensure_authenticated()
+
+        # Ensure live SignalR stream is running
+        self.start_live_stream()
+
+        students = await self.get_students()
+        scans = await self.get_student_scans()
+
+        # Index latest scan by studentId
+        scans_by_student: dict[int, dict[str, Any]] = {}
+        for scan in scans:
+            st_id = scan.get("studentId")
+            if st_id and st_id not in scans_by_student:
+                scans_by_student[st_id] = scan
+
+        students_map: dict[int, dict[str, Any]] = {}
+        for student in students:
+            st_id = student.get("studentId")
+            if not st_id:
+                continue
+
+            run_info = student.get("runInfo", [])
+            bus_number = None
+            active_vehicle = None
+            route_name = None
+            driver_name = None
+            if run_info:
+                run = run_info[0]
+                bus_number = run.get("busNumber")
+                active_vehicle = run.get("activeVehicle") or run.get("rolloutBusNumber")
+                route_name = run.get("visibleName") or run.get("runName")
+                driver_name = run.get("driverName")
+
+            scan = scans_by_student.get(st_id, {})
+            scan_vehicle = scan.get("assetUniqueId")
+
+            # Look up live bus coordinates from SignalR telemetry
+            bus_lat, bus_lon = self.get_live_vehicle_location(
+                active_vehicle, bus_number, scan_vehicle
+            )
+
+            students_map[st_id] = {
+                "student": student,
+                "student_id": st_id,
+                "first_name": student.get("firstName", ""),
+                "last_name": student.get("lastName", ""),
+                "school_name": student.get("locationName"),
+                "bus_number": bus_number,
+                "active_vehicle": active_vehicle,
+                "route_name": route_name,
+                "driver_name": driver_name,
+                "stop_location": scan.get("scanLocation"),
+                "stop_latitude": scan.get("stopLatitude"),
+                "stop_longitude": scan.get("stopLongitude"),
+                "bus_latitude": bus_lat,
+                "bus_longitude": bus_lon,
+                "last_scan_time": scan.get("scanDateTime"),
+                "last_scan_state": scan.get("scanState"),
+            }
+
+        return {
+            "students": students,
+            "scans": scans,
+            "students_map": students_map,
+        }
 
     def _extract_tenant_from_jwt(self) -> str | None:
         """Extract tenant ID from JWT claims if available."""
@@ -239,62 +536,7 @@ class MyRideK12Api:
         _LOGGER.error("Failed to fetch student scans (HTTP %s): %s", status, data)
         raise MyRideK12ApiError(f"Failed to fetch student scans: {status}")
 
-    async def fetch_all_bus_data(self) -> dict[str, Any]:
-        """Fetch consolidated student, route, and stop data per student."""
-        await self._ensure_authenticated()
 
-        students = await self.get_students()
-        scans = await self.get_student_scans()
-
-        # Index latest scan by studentId
-        scans_by_student: dict[int, dict[str, Any]] = {}
-        for scan in scans:
-            st_id = scan.get("studentId")
-            if st_id and st_id not in scans_by_student:
-                scans_by_student[st_id] = scan
-
-        students_map: dict[int, dict[str, Any]] = {}
-        for student in students:
-            st_id = student.get("studentId")
-            if not st_id:
-                continue
-
-            run_info = student.get("runInfo", [])
-            bus_number = None
-            active_vehicle = None
-            route_name = None
-            driver_name = None
-            if run_info:
-                run = run_info[0]
-                bus_number = run.get("busNumber")
-                active_vehicle = run.get("activeVehicle") or run.get("rolloutBusNumber")
-                route_name = run.get("visibleName") or run.get("runName")
-                driver_name = run.get("driverName")
-
-            scan = scans_by_student.get(st_id, {})
-
-            students_map[st_id] = {
-                "student": student,
-                "student_id": st_id,
-                "first_name": student.get("firstName", ""),
-                "last_name": student.get("lastName", ""),
-                "school_name": student.get("locationName"),
-                "bus_number": bus_number,
-                "active_vehicle": active_vehicle,
-                "route_name": route_name,
-                "driver_name": driver_name,
-                "stop_location": scan.get("scanLocation"),
-                "stop_latitude": scan.get("stopLatitude"),
-                "stop_longitude": scan.get("stopLongitude"),
-                "last_scan_time": scan.get("scanDateTime"),
-                "last_scan_state": scan.get("scanState"),
-            }
-
-        return {
-            "students": students,
-            "scans": scans,
-            "students_map": students_map,
-        }
 
     @staticmethod
     def calculate_distance(
